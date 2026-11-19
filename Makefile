@@ -3,6 +3,8 @@ run:
 	PYTHONPATH=src:. $(PY) -m courtdocket.cli
 run_inc:
 	PYTHONPATH=src:. $(PY) -m courtdocket.cli --incremental
+schedule:
+	PYTHONPATH=src:. $(PY) -m courtdocket.cli --schedule $(if $(ASOF),--as-of $(ASOF),)
 test:
 	PYTHONPATH=src:. $(PY) -m pytest -q
 mock:

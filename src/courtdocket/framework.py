@@ -1,12 +1,13 @@
 """Local transport, parsing, storage, and session helpers."""
 from __future__ import annotations
-import hashlib
 import importlib
 import json
 
 from lxml import html as _lh
 
+from . import kernel
 from .config import SPEC
+from .kernel import canonical, content_hash  # noqa: F401  (re-exported)
 from .store import Store
 
 
@@ -136,14 +137,6 @@ def fetch_all(http: Http):
 # --------------------------------------------------------------------------- #
 # Record identity helpers.
 # --------------------------------------------------------------------------- #
-def canonical(d):
-    return json.dumps(d, sort_keys=True, ensure_ascii=False)
-
-
-def content_hash(d):
-    return hashlib.sha256(canonical(d).encode()).hexdigest()[:24]
-
-
 def dedup(records):
     seen, out, dup = set(), [], 0
     for r in records:
@@ -164,13 +157,9 @@ def normalize(r):
 
 
 def _apply_kernel(records):
-    k = importlib.import_module(".kernel", __package__)
     for r in records:
-        if hasattr(k, "process"):
-            r.update(k.process(r))
-    if hasattr(k, "reduce"):
-        records = k.reduce(records)
-    return records
+        r.update(kernel.process(r))
+    return kernel.reduce(records)
 
 
 # --------------------------------------------------------------------------- #
@@ -189,9 +178,12 @@ def run(mode="full", con=None):
         norm = _apply_kernel(norm)
 
         wm = store.watermark()
-        if mode == "incremental" and wm:
-            norm = [r for r in norm if str(r.get("ts", "")) > wm]
-
+        # Incremental runs must NOT discard late-arriving notices whose event
+        # time is older than the watermark: the portal does push earlier-issued
+        # hearing notices (更早发出的开庭通知) after a case was postponed, and
+        # dropping them would make incremental and full histories disagree.
+        # Dedup by content hash already makes re-ingestion idempotent, so the
+        # watermark is kept as a monotonic progress marker only.
         ingested = sum(1 for r in norm if store.upsert(r))
         total = store.count()
         new_wm = max([str(r.get("ts", "")) for r in norm] + [wm or ""])
@@ -273,7 +265,7 @@ class Rpa:
         return bool(data.get("created"))
 
 
-def run_rpa(con=None):
+def run_rpa(mode="full", con=None):
     own = con is None
     con = con or Store().connect()
     store = Store(con)
@@ -295,10 +287,11 @@ def run_rpa(con=None):
         for x in norm[:1]:
             if not r.submit(x):
                 dedup_submit += 1
-        wm = max([str(x.get("ts", "")) for x in norm] + [""])
+        wm = max([str(x.get("ts", "")) for x in norm] + [store.watermark() or ""])
         if wm:
             store.set_watermark(wm)
-        return {"engine": "rpa", "logged_in": logged, "captcha_solved": r.captcha_solved,
+        return {"engine": "rpa", "mode": mode, "logged_in": logged,
+                "captcha_solved": r.captcha_solved,
                 "collected": len(items), "fetched": len(items), "duplicates": dup,
                 "ingested": ingested, "count": total,
                 "submit_created": created, "submit_dedup": dedup_submit, "log": r.log}
